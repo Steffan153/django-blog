@@ -1,82 +1,96 @@
-from datetime import date
-from django.http.response import HttpResponse
+from typing import Any, Dict
+from django.db.models.query import QuerySet
+from django.http.request import HttpRequest
+from django.http.response import HttpResponse, HttpResponseRedirect
 from django.shortcuts import render
-from django.http import HttpRequest
+from django.views.generic.list import ListView
+from django.views.generic.base import View
+from django.urls.base import reverse
 
-all_posts = [
-    {
-        "slug": "hike-in-the-mountains",
-        "image": "mountains.jpg",
-        "author": "Maximilian",
-        "date": date(2021, 7, 21),
-        "title": "Mountain Hiking",
-        "excerpt": "There's nothing like the views you get when hiking in the mountains! And I wasn't even prepared for what happened whilst I was enjoying the view!",
-        "content": """
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-        """
-    },
-    {
-        "slug": "programming-is-fun",
-        "image": "coding.jpg",
-        "author": "Maximilian",
-        "date": date(2022, 3, 10),
-        "title": "Programming Is Great!",
-        "excerpt": "Did you ever spend hours searching that one error in your code? Yep - that's what happened to me yesterday...",
-        "content": """
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-        """
-    },
-    {
-        "slug": "into-the-woods",
-        "image": "woods.jpg",
-        "author": "Maximilian",
-        "date": date(2020, 8, 5),
-        "title": "Nature At Its Best",
-        "excerpt": "Nature is amazing! The amount of inspiration I get when walking in nature is incredible!",
-        "content": """
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-
-          Lorem ipsum dolor sit amet consectetur adipisicing elit. Officiis nobis
-          aperiam est praesentium, quos iste consequuntur omnis exercitationem quam
-          velit labore vero culpa ad mollitia? Quis architecto ipsam nemo. Odio.
-        """
-    }
-]
+from .models import Post
+from .forms import CommentForm
 
 
-def starting_page(request: HttpRequest) -> HttpResponse:
-    return render(request, 'blog/index.html', { "posts": sorted(all_posts, key=lambda x: x['date'])[-3:] })
+class StartingPage(ListView):
+    template_name = 'blog/index.html'
+    model = Post
+    ordering = ['-date']
+    context_object_name = "posts"
+
+    def get_queryset(self) -> QuerySet:
+        return super().get_queryset()[:3]
 
 
-def posts(request: HttpRequest) -> HttpResponse:
-    return render(request, 'blog/posts.html', { "posts": sorted(all_posts, key=lambda x: x['date']) })
+class AllPosts(ListView):
+    template_name = 'blog/posts.html'
+    model = Post
+    ordering = ['-date']
+    context_object_name = "posts"
 
 
-def post_detail(request: HttpRequest, slug: str) -> HttpResponse:
-    return render(request, 'blog/post-detail.html', { "post": next(post for post in all_posts if post['slug'] == slug) })
+class PostDetail(View):
+    def get_context(self, request: HttpRequest, post: Post, form: Any) -> Dict[str, Any]:
+        return {
+            "post": post,
+            "comments": post.comments.order_by('-id').all(),
+            "comment_form": form,
+            "is_saved": post.id in (request.session.get("stored_posts") or [])
+        }
+    
+    def get(self, request: HttpRequest, slug: str) -> HttpResponse:
+        post = Post.objects.get(slug=slug)
+        form = CommentForm()
+        context = self.get_context(request, post, form)
+        return render(request, 'blog/post-detail.html', context)
+
+    def post(self, request: HttpRequest, slug: str) -> HttpResponse:
+        form = CommentForm(request.POST)
+        post = Post.objects.get(slug=slug)
+        if form.is_valid():
+            comment = form.save(commit=False)
+            comment.post = post
+            comment.save()
+            return HttpResponseRedirect(reverse('post_detail', args=[slug]))
+        context = self.get_context(request, post, form)
+        return render(request, 'blog/post-detail.html', context)
+
+class ReadLater(View):
+    def get(self, request: HttpRequest) -> HttpResponse:
+        stored_posts = request.session.get("stored_posts")
+        context = {}
+        if stored_posts is None or len(stored_posts) == 0:
+            context['posts'] = []
+            context['has_posts'] = False
+        else:
+            context['posts'] = Post.objects.filter(id__in=stored_posts)
+            context['has_posts'] = True
+        return render(request, 'blog/stored-posts.html', context)
+
+    def post(self, request: HttpRequest) -> HttpResponse:
+        stored_posts = request.session.get("stored_posts")
+
+        if stored_posts is None:
+            stored_posts = []
+        
+        id = int(request.POST['post_id'])
+
+        if id not in stored_posts:
+            stored_posts.append(id)
+            request.session['stored_posts'] = stored_posts
+        
+        return HttpResponseRedirect(reverse("read_later"))
+
+class RemoveReadLater(View):
+    def post(self, request: HttpRequest) -> HttpResponse:
+        stored_posts = request.session.get("stored_posts")
+
+        if stored_posts is None:
+            stored_posts = []
+
+        id = int(request.POST['post_id'])
+
+        if id in stored_posts:
+            stored_posts.remove(id)
+            request.session['stored_posts'] = stored_posts
+
+        return HttpResponseRedirect(reverse("read_later"))
